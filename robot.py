@@ -2,15 +2,14 @@
 """
 robot.py
 --------
-Drop this file in Code/Server/ on the Raspberry Pi, then run:
+Run from Code/Server/ on the Raspberry Pi:
 
-    cd Code/Server
+    cd ~/Freenove_Tank_Robot_Kit_for_Raspberry_Pi/Code/Server
     python3 robot.py
 
-The robot will:
-  1. Follow a black line using the three IR sensors
-  2. Avoid obstacles using the ultrasonic sensor
-  3. Pick up any object within reach using the servo clamp
+All classes are copied exactly from the Freenove source files:
+  parameter.py · infrared.py · ultrasonic.py · motor.py · servo.py · car.py
+Only the motor speed values have been halved.
 """
 
 import os
@@ -19,10 +18,8 @@ import subprocess
 import time
 import warnings
 
-
 # =============================================================================
-# PARAMETER MANAGER
-# Reads / creates params.json to know PCB version and Pi version
+# parameter.py — ParameterManager
 # =============================================================================
 
 class ParameterManager:
@@ -30,490 +27,606 @@ class ParameterManager:
 
     def __init__(self):
         self.file_path = self.PARAM_FILE
-        if not self._exists() or not self._valid():
-            self._setup()
+        if self.file_exists() == False or self.validate_params() == False:
+            self.deal_with_param()
 
-    def _exists(self, path=None):
-        return os.path.exists(path or self.file_path)
+    def file_exists(self, file_path=None):
+        file_path = file_path or self.file_path
+        return os.path.exists(file_path)
 
-    def _valid(self, path=None):
-        path = path or self.file_path
-        if not self._exists(path):
+    def validate_params(self, file_path=None):
+        file_path = file_path or self.file_path
+        if not self.file_exists(file_path):
             return False
         try:
-            with open(path) as f:
-                p = json.load(f)
-            return (p.get('Pcb_Version') in [1, 2] and
-                    p.get('Pi_Version')  in [1, 2])
-        except Exception:
+            with open(file_path, 'r') as file:
+                params = json.load(file)
+                return ('Pcb_Version' in params and params['Pcb_Version'] in [1, 2]) and \
+                       ('Pi_Version' in params and params['Pi_Version'] in [1, 2])
+        except json.JSONDecodeError:
+            print("Error decoding JSON file.")
+            return False
+        except Exception as e:
+            print(f"Error reading file: {e}")
             return False
 
-    def _read(self, key):
-        if self._valid():
-            with open(self.file_path) as f:
-                return json.load(f).get(key)
+    def get_param(self, param_name, file_path=None):
+        file_path = file_path or self.file_path
+        if self.validate_params(file_path):
+            with open(file_path, 'r') as file:
+                params = json.load(file)
+                return params.get(param_name)
         return None
 
-    def _write(self, data):
-        with open(self.file_path, 'w') as f:
-            json.dump(data, f, indent=4)
+    def set_param(self, param_name, value, file_path=None):
+        file_path = file_path or self.file_path
+        params = {}
+        if self.file_exists(file_path):
+            with open(file_path, 'r') as file:
+                params = json.load(file)
+        params[param_name] = value
+        with open(file_path, 'w') as file:
+            json.dump(params, file, indent=4)
 
-    @staticmethod
-    def _detect_pi():
+    def delete_param_file(self, file_path=None):
+        file_path = file_path or self.file_path
+        if self.file_exists(file_path):
+            os.remove(file_path)
+            print(f"Deleted {file_path}")
+        else:
+            print(f"File {file_path} does not exist")
+
+    def create_param_file(self, file_path=None):
+        file_path = file_path or self.file_path
+        default_params = {
+            'Pcb_Version': 2,
+            'Pi_Version': self.get_raspberry_pi_version()
+        }
+        with open(file_path, 'w') as file:
+            json.dump(default_params, file, indent=4)
+
+    def get_raspberry_pi_version(self):
         try:
-            r = subprocess.run(
-                ['cat', '/sys/firmware/devicetree/base/model'],
-                capture_output=True, text=True)
-            if r.returncode == 0 and 'Raspberry Pi 5' in r.stdout:
-                return 2
-        except Exception:
-            pass
-        return 1
+            result = subprocess.run(['cat', '/sys/firmware/devicetree/base/model'],
+                                    capture_output=True, text=True)
+            if result.returncode == 0:
+                model = result.stdout.strip()
+                if "Raspberry Pi 5" in model:
+                    return 2
+                else:
+                    return 1
+            else:
+                print("Failed to get Raspberry Pi model information.")
+                return 1
+        except Exception as e:
+            print(f"Error getting Raspberry Pi version: {e}")
+            return 1
 
-    def _setup(self):
-        print("No valid params.json found — first-time setup.")
-        while True:
-            try:
-                pcb = int(input("  Enter PCB Version (1 or 2): "))
-                if pcb in [1, 2]:
-                    break
-            except ValueError:
-                pass
-            print("  Please enter 1 or 2.")
-        pi = self._detect_pi()
-        self._write({'Pcb_Version': pcb, 'Pi_Version': pi})
-        print(f"  Saved PCB={pcb}, Pi={pi}\n")
+    def deal_with_param(self):
+        if not self.file_exists() or not self.validate_params():
+            print(f"Parameter file {self.PARAM_FILE} does not exist or contains invalid parameters.")
+            user_input_required = True
+        else:
+            user_choice = input("Do you want to re-enter the hardware versions? (yes/no): ").strip().lower()
+            user_input_required = user_choice == 'yes'
+
+        if user_input_required:
+            print("Please enter the hardware versions.")
+            while True:
+                try:
+                    pcb_version = int(input("Enter PCB Version (1 or 2): "))
+                    if pcb_version in [1, 2]:
+                        break
+                    else:
+                        print("Invalid PCB Version. Please enter 1 or 2.")
+                except ValueError:
+                    print("Invalid input. Please enter a number.")
+            pi_version = self.get_raspberry_pi_version()
+            self.create_param_file()
+            self.set_param('Pcb_Version', pcb_version)
+            self.set_param('Pi_Version', pi_version)
+        else:
+            print("Do not modify the hardware version. Skipping...")
 
     def get_pcb_version(self):
-        return self._read('Pcb_Version')
+        return self.get_param('Pcb_Version')
 
     def get_pi_version(self):
-        return self._read('Pi_Version')
+        return self.get_param('Pi_Version')
 
 
 # =============================================================================
-# INFRARED — three line sensors
+# infrared.py — Infrared
 # =============================================================================
 
 class Infrared:
-    """
-    Reads three IR line sensors.
-    read_all() returns a 3-bit integer:
-      bit2 = left sensor, bit1 = centre, bit0 = right
-      e.g. 0b010 (2) = only centre sensor on line → go straight
-    """
-
-    def __init__(self, pcb_version):
+    def __init__(self):
         from gpiozero import LineSensor
-        if pcb_version == 1:
-            pins = (16, 20, 21)
-        else:
-            pins = (16, 26, 21)
-        self._s = [LineSensor(p) for p in pins]
+        self.param = ParameterManager()
+        self.pcb_version = self.param.get_pcb_version()
+        self.pi_version = self.param.get_raspberry_pi_version()
 
-    def _read(self, idx):
-        return 1 if self._s[idx].value else 0
+        if self.pcb_version == 1:
+            self.IR01 = 16
+            self.IR02 = 20
+            self.IR03 = 21
+        elif self.pcb_version == 2:
+            self.IR01 = 16
+            self.IR02 = 26
+            self.IR03 = 21
 
-    def read_all(self):
-        return (self._read(0) << 2) | (self._read(1) << 1) | self._read(2)
+        self.IR01_sensor = LineSensor(self.IR01)
+        self.IR02_sensor = LineSensor(self.IR02)
+        self.IR03_sensor = LineSensor(self.IR03)
+
+    def read_one_infrared(self, channel):
+        if channel == 1:
+            return 1 if self.IR01_sensor.value else 0
+        elif channel == 2:
+            return 1 if self.IR02_sensor.value else 0
+        elif channel == 3:
+            return 1 if self.IR03_sensor.value else 0
+
+    def read_all_infrared(self):
+        return (self.read_one_infrared(1) << 2) | (self.read_one_infrared(2) << 1) | self.read_one_infrared(3)
 
     def close(self):
-        for s in self._s:
-            s.close()
+        self.IR01_sensor.close()
+        self.IR02_sensor.close()
+        self.IR03_sensor.close()
 
 
 # =============================================================================
-# ULTRASONIC — distance in cm
+# ultrasonic.py — gpiozero_ultrasonic, lgpiod_ultrasonic, Ultrasonic
 # =============================================================================
 
-class _GpiozeroUltrasonic:
-    def __init__(self, trigger, echo):
-        from gpiozero import DistanceSensor, PWMSoftwareFallback
-        warnings.filterwarnings('ignore', category=PWMSoftwareFallback)
-        self._s = DistanceSensor(echo=echo, trigger=trigger, max_distance=3)
+class gpiozero_ultrasonic:
+    def __init__(self, trigger_pin=27, echo_pin=22):
+        try:
+            from gpiozero import DistanceSensor, PWMSoftwareFallback
+            warnings.filterwarnings("ignore", category=PWMSoftwareFallback)
+            self.trigger_pin = trigger_pin
+            self.echo_pin = echo_pin
+            self.sensor = DistanceSensor(echo=self.echo_pin, trigger=self.trigger_pin, max_distance=3)
+        except ImportError:
+            raise RuntimeError("gpiozero library not available")
 
     def get_distance(self):
         try:
-            return round(self._s.distance * 100, 1)
+            distance_cm = self.sensor.distance * 100
+            return round(float(distance_cm), 1)
         except Exception:
             return -1
 
     def close(self):
-        self._s.close()
+        if hasattr(self, 'sensor'):
+            self.sensor.close()
 
 
-class _LgpiodUltrasonic:
-    def __init__(self, trigger, echo):
-        import lgpio
-        self._lg = lgpio
-        self._trig = trigger
-        self._echo = echo
+class lgpiod_ultrasonic:
+    def __init__(self, trigger_pin=27, echo_pin=22):
         try:
-            self._chip = lgpio.gpiochip_open(0)
-        except Exception:
-            self._chip = lgpio.gpiochip_open(4)
-        lgpio.gpio_claim_output(self._chip, trigger)
-        lgpio.gpio_claim_input(self._chip,  echo)
-
-    def get_distance(self):
-        try:
-            lg = self._lg
-            lg.gpio_write(self._chip, self._trig, 0)
-            time.sleep(0.05)
-            lg.gpio_write(self._chip, self._trig, 1)
-            time.sleep(0.00001)
-            lg.gpio_write(self._chip, self._trig, 0)
-            deadline = time.time() + 1.0
-            t0 = time.time()
-            while lg.gpio_read(self._chip, self._echo) == 0:
-                t0 = time.time()
-                if t0 > deadline:
-                    return -1
-            t1 = time.time()
-            while lg.gpio_read(self._chip, self._echo) == 1:
-                t1 = time.time()
-                if t1 > deadline:
-                    return -1
-            return round((t1 - t0) * 34300 / 2, 1)
-        except Exception:
-            return -1
-
-    def close(self):
-        if getattr(self, '_chip', None) is not None:
+            import lgpio
+            self.lgpio = lgpio
+            self.trigger_pin = trigger_pin
+            self.echo_pin = echo_pin
             try:
-                self._lg.gpiochip_close(self._chip)
-                self._chip = None
+                self.chip = lgpio.gpiochip_open(0)
+            except:
+                self.chip = lgpio.gpiochip_open(4)
+            lgpio.gpio_claim_output(self.chip, self.trigger_pin)
+            lgpio.gpio_claim_input(self.chip, self.echo_pin)
+        except ImportError:
+            raise RuntimeError("lgpio library not available")
+
+    def get_distance(self):
+        try:
+            lgpio = self.lgpio
+            lgpio.gpio_write(self.chip, self.trigger_pin, 0)
+            time.sleep(0.05)
+            lgpio.gpio_write(self.chip, self.trigger_pin, 1)
+            time.sleep(0.00001)
+            lgpio.gpio_write(self.chip, self.trigger_pin, 0)
+            timeout = time.time() + 1.0
+            start_time = time.time()
+            while lgpio.gpio_read(self.chip, self.echo_pin) == 0:
+                start_time = time.time()
+                if start_time > timeout:
+                    return -1
+            stop_time = time.time()
+            while lgpio.gpio_read(self.chip, self.echo_pin) == 1:
+                stop_time = time.time()
+                if stop_time > timeout:
+                    return -1
+            duration = stop_time - start_time
+            distance = (duration * 34300) / 2
+            return round(float(distance), 1)
+        except Exception:
+            return -1
+
+    def close(self):
+        if hasattr(self, 'chip') and self.chip is not None:
+            try:
+                self.lgpio.gpiochip_close(self.chip)
+                self.chip = None
             except Exception:
                 pass
 
 
 class Ultrasonic:
-    def __init__(self, pi_version, trigger=27, echo=22):
-        if pi_version == 2:
-            self._impl = _LgpiodUltrasonic(trigger, echo)
+    def __init__(self, trigger_pin=27, echo_pin=22):
+        self.trigger_pin = trigger_pin
+        self.echo_pin = echo_pin
+        self.param_manager = ParameterManager()
+        self.pi_version = self.param_manager.get_pi_version()
+        self.sensor = None
+
+        if self.pi_version == 2:
+            print("Using lgpiod_ultrasonic")
+            self.sensor = lgpiod_ultrasonic(trigger_pin, echo_pin)
         else:
-            self._impl = _GpiozeroUltrasonic(trigger, echo)
+            print("Using gpiozero_ultrasonic")
+            self.sensor = gpiozero_ultrasonic(trigger_pin, echo_pin)
 
     def get_distance(self):
-        return self._impl.get_distance()
+        if self.sensor is None:
+            return -1
+        return self.sensor.get_distance()
 
     def close(self):
-        self._impl.close()
+        if self.sensor is not None:
+            self.sensor.close()
+            self.sensor = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
 
 # =============================================================================
-# MOTORS — left and right tracks
+# motor.py — tankMotor
 # =============================================================================
 
-class Motor:
-    """
-    setMotorModel(left, right) where values are in range -4095 .. +4095.
-    Positive = forward, negative = backward.
-    """
-
+class tankMotor:
     def __init__(self):
-        from gpiozero import Motor as _M
-        self._left  = _M(24, 23)
-        self._right = _M(5,  6)
+        from gpiozero import Motor
+        self.left_motor  = Motor(24, 23)
+        self.right_motor = Motor(5, 6)
 
-    @staticmethod
-    def _clamp(v):
-        return max(-4095, min(4095, int(v)))
+    def duty_range(self, duty1, duty2):
+        if duty1 > 4095:
+            duty1 = 4095
+        elif duty1 < -4095:
+            duty1 = -4095
+        if duty2 > 4095:
+            duty2 = 4095
+        elif duty2 < -4095:
+            duty2 = -4095
+        return duty1, duty2
 
-    @staticmethod
-    def _drive(m, duty):
+    def left_Wheel(self, duty):
         if duty > 0:
-            m.forward(duty / 4096)
+            self.left_motor.forward(duty / 4096)
         elif duty < 0:
-            m.backward(-duty / 4096)
+            self.left_motor.backward(-duty / 4096)
         else:
-            m.stop()
+            self.left_motor.stop()
 
-    def setMotorModel(self, left, right):
-        self._drive(self._left,  self._clamp(left))
-        self._drive(self._right, self._clamp(right))
+    def right_Wheel(self, duty):
+        if duty > 0:
+            self.right_motor.forward(duty / 4096)
+        elif duty < 0:
+            self.right_motor.backward(-duty / 4096)
+        else:
+            self.right_motor.stop()
 
-    def stop(self):
-        self.setMotorModel(0, 0)
+    def setMotorModel(self, duty1, duty2):
+        duty1, duty2 = self.duty_range(duty1, duty2)
+        self.left_Wheel(duty1)
+        self.right_Wheel(duty2)
 
     def close(self):
-        self._left.close()
-        self._right.close()
+        self.left_motor.close()
+        self.right_motor.close()
 
 
 # =============================================================================
-# SERVO — two-channel arm + clamp
+# servo.py — PigpioServo, GpiozeroServo, HardwareServo, Servo
 # =============================================================================
 
-class _GpiozeroServo:
-    """PCB v1 — soft PWM via gpiozero on GPIO 7, 8, 25."""
+class PigpioServo:
+    def __init__(self):
+        import pigpio
+        self.channel1 = 7
+        self.channel2 = 8
+        self.channel3 = 25
+        self.PwmServo = pigpio.pi()
+        self.PwmServo.set_mode(self.channel1, pigpio.OUTPUT)
+        self.PwmServo.set_mode(self.channel2, pigpio.OUTPUT)
+        self.PwmServo.set_mode(self.channel3, pigpio.OUTPUT)
+        self.PwmServo.set_PWM_frequency(self.channel1, 50)
+        self.PwmServo.set_PWM_frequency(self.channel2, 50)
+        self.PwmServo.set_PWM_frequency(self.channel3, 50)
+        self.PwmServo.set_PWM_range(self.channel1, 4000)
+        self.PwmServo.set_PWM_range(self.channel2, 4000)
+        self.PwmServo.set_PWM_range(self.channel3, 4000)
 
+    def setServoPwm(self, channel, angle):
+        if channel == '0':
+            self.PwmServo.set_PWM_dutycycle(self.channel1, 80 + (400 / 180) * angle)
+        elif channel == '1':
+            self.PwmServo.set_PWM_dutycycle(self.channel2, 80 + (400 / 180) * angle)
+        elif channel == '2':
+            self.PwmServo.set_PWM_dutycycle(self.channel3, 80 + (400 / 180) * angle)
+
+
+class GpiozeroServo:
     def __init__(self):
         from gpiozero import AngularServo
-        kw = dict(min_angle=0, max_angle=180,
-                  min_pulse_width=0.0005, max_pulse_width=0.0025)
-        self._s = {
-            '0': AngularServo(7,  initial_angle=0, **kw),
-            '1': AngularServo(8,  initial_angle=0, **kw),
-            '2': AngularServo(25, initial_angle=0, **kw),
-        }
+        self.channel1 = 7
+        self.channel2 = 8
+        self.channel3 = 25
+        self.myCorrection = 0.0
+        self.maxPW = (2.5 + self.myCorrection) / 1000
+        self.minPW = (0.5 - self.myCorrection) / 1000
+        self.servo1 = AngularServo(self.channel1, initial_angle=0, min_angle=0, max_angle=180,
+                                   min_pulse_width=self.minPW, max_pulse_width=self.maxPW)
+        self.servo2 = AngularServo(self.channel2, initial_angle=0, min_angle=0, max_angle=180,
+                                   min_pulse_width=self.minPW, max_pulse_width=self.maxPW)
+        self.servo3 = AngularServo(self.channel3, initial_angle=0, min_angle=0, max_angle=180,
+                                   min_pulse_width=self.minPW, max_pulse_width=self.maxPW)
 
     def setServoPwm(self, channel, angle):
-        if channel in self._s:
-            self._s[channel].angle = angle
+        if channel == '0':
+            self.servo1.angle = angle
+        elif channel == '1':
+            self.servo2.angle = angle
+        elif channel == '2':
+            self.servo3.angle = angle
 
-    def stop(self):
-        pass   # gpiozero servos don't need explicit stop
 
-
-class _HardwareServo:
-    """PCB v2 — hardware PWM on GPIO 12 (ch0) and GPIO 13 (ch1)."""
-
-    def __init__(self):
+class HardwareServo:
+    def __init__(self, pcb_version):
         from rpi_hardware_pwm import HardwarePWM
-        self._p = {
-            '0': HardwarePWM(pwm_channel=0, hz=50, chip=0),
-            '1': HardwarePWM(pwm_channel=1, hz=50, chip=0),
-        }
-        for p in self._p.values():
-            p.start(0)
+        self.pcb_version = pcb_version
+        self.pwm_gpio12 = None
+        self.pwm_gpio13 = None
+        if self.pcb_version == 1:
+            self.pwm_gpio12 = HardwarePWM(pwm_channel=0, hz=50, chip=0)
+            self.pwm_gpio13 = HardwarePWM(pwm_channel=1, hz=50, chip=0)
+        elif self.pcb_version == 2:
+            self.pwm_gpio12 = HardwarePWM(pwm_channel=0, hz=50, chip=0)
+            self.pwm_gpio13 = HardwarePWM(pwm_channel=1, hz=50, chip=0)
+        self.pwm_gpio12.start(0)
+        self.pwm_gpio13.start(0)
 
-    @staticmethod
-    def _duty(angle):
-        return (angle / 180) * (12.5 - 2.5) + 2.5
+    def setServoStop(self, channel):
+        if channel == '0':
+            self.pwm_gpio12.stop()
+        elif channel == '1':
+            self.pwm_gpio13.stop()
+
+    def setServoFrequency(self, channel, freq):
+        if channel == '0':
+            self.pwm_gpio12.change_frequency(freq)
+        elif channel == '1':
+            self.pwm_gpio13.change_frequency(freq)
+
+    def setServoDuty(self, channel, duty):
+        if channel == '0':
+            self.pwm_gpio12.change_duty_cycle(duty)
+        elif channel == '1':
+            self.pwm_gpio13.change_duty_cycle(duty)
+
+    def map(self, x, in_min, in_max, out_min, out_max):
+        return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
 
     def setServoPwm(self, channel, angle):
-        if channel in self._p:
-            self._p[channel].change_duty_cycle(self._duty(angle))
-
-    def stop(self):
-        for p in self._p.values():
-            try:
-                p.stop()
-            except Exception:
-                pass
+        if channel == '0':
+            duty = self.map(angle, 0, 180, 2.5, 12.5)
+            self.setServoDuty(channel, duty)
+        elif channel == '1':
+            duty = self.map(angle, 0, 180, 2.5, 12.5)
+            self.setServoDuty(channel, duty)
 
 
 class Servo:
-    # Valid angle ranges per channel
-    _LIMITS = {'0': (90, 150), '1': (90, 150), '2': (0, 180)}
+    def __init__(self):
+        self.param = ParameterManager()
+        self.pcb_version = self.param.get_pcb_version()
+        self.pi_version = self.param.get_raspberry_pi_version()
 
-    def __init__(self, pcb_version, pi_version):
-        if pcb_version == 2:
-            self._impl = _HardwareServo()
-        else:
-            self._impl = _GpiozeroServo()
-        # Park at resting position
-        self.setServoAngle('0', 90)
-        self.setServoAngle('1', 140)
+        if self.pcb_version == 1 and self.pi_version == 1:
+            self.pwm = GpiozeroServo()
+        elif self.pcb_version == 1 and self.pi_version == 2:
+            self.pwm = GpiozeroServo()
+        elif self.pcb_version == 2 and self.pi_version == 1:
+            self.pwm = HardwareServo(1)
+        elif self.pcb_version == 2 and self.pi_version == 2:
+            self.pwm = HardwareServo(2)
+        self.pwm.setServoPwm('0', 90)
+        self.pwm.setServoPwm('1', 140)
+
+    def angle_range(self, channel, init_angle):
+        if channel == '0':
+            if init_angle < 90:
+                init_angle = 90
+            elif init_angle > 150:
+                init_angle = 150
+        elif channel == '1':
+            if init_angle < 90:
+                init_angle = 90
+            elif init_angle > 150:
+                init_angle = 150
+        elif channel == '2':
+            if init_angle < 0:
+                init_angle = 0
+            elif init_angle > 180:
+                init_angle = 180
+        return init_angle
 
     def setServoAngle(self, channel, angle):
-        lo, hi = self._LIMITS.get(str(channel), (0, 180))
-        angle = max(lo, min(hi, int(angle)))
-        self._impl.setServoPwm(str(channel), angle)
+        angle = self.angle_range(str(channel), int(angle))
+        self.pwm.setServoPwm(str(channel), int(angle))
 
     def setServoStop(self):
-        self._impl.stop()
+        if self.pcb_version == 2:
+            self.pwm.setServoStop('0')
+            self.pwm.setServoStop('1')
 
 
 # =============================================================================
-# ROBOT — main behaviour
+# car.py — Car  (motor speeds halved from original)
 # =============================================================================
 
-class Robot:
-    # ── Tuning constants ──────────────────────────────────────────────────────
-    SPEED_FWD    = 1200   # normal forward speed
-    SPEED_TURN   = 1500   # gentle turn
-    SPEED_SHARP  = 2500   # sharp turn (outer wheel)
-    AVOID_DIST   = 45.0   # cm — obstacle threshold in avoidance mode
-    PICKUP_MAX   = 12.0   # cm — start pickup sequence if closer than this
-    PICKUP_IDEAL_LO = 7.5 # cm — ideal grab distance (low)
-    PICKUP_IDEAL_HI = 7.7 # cm — ideal grab distance (high)
-
+class Car:
     def __init__(self):
-        print("=== Freenove Tank Robot ===")
-        print("Initialising hardware…")
-        params = ParameterManager()
-        pcb = params.get_pcb_version()
-        pi  = params.get_pi_version()
-        print(f"  PCB version : {pcb}")
-        print(f"  Pi  version : {'5' if pi == 2 else '4 or earlier'}")
+        self.servo    = None
+        self.sonic    = None
+        self.motor    = None
+        self.infrared = None
+        self.start()
 
-        self.motor  = Motor()
-        self.servo  = Servo(pcb, pi)
-        self.ir     = Infrared(pcb)
-        self.sonic  = Ultrasonic(pi)
-        self._stop  = False
-        print("Hardware ready.\n")
-
-    # ── Clamp sequences ───────────────────────────────────────────────────────
-
-    def _clamp_approach_and_grab(self):
-        """
-        Drive the robot to the exact grab distance, then sweep the servo
-        arm down to pick the object up.
-        """
-        print("  [clamp] approaching object…")
-        deadline = time.time() + 6.0
-        grabbed  = False
-
-        while time.time() < deadline and not self._stop:
-            d = self.sonic.get_distance()
-            if d < 0:
-                break
-
-            if d <= 5.0:
-                self.motor.setMotorModel(-1200, -1200)   # too close, back off
-            elif d < self.PICKUP_IDEAL_LO:
-                self.motor.setMotorModel(-800, -800)
-            elif self.PICKUP_IDEAL_LO <= d <= self.PICKUP_IDEAL_HI:
-                self.motor.stop()
-                # ── grab sequence ──────────────────────────────────────────
-                print("  [clamp] grabbing…")
-                for a in range(140, 89, -1):             # open / lower arm
-                    self.servo.setServoAngle('1', a)
-                    time.sleep(0.01)
-                for a in range(90, 130):                 # extend arm forward
-                    self.servo.setServoAngle('0', a)
-                    time.sleep(0.01)
-                for a in range(90, 140):                 # close / raise arm
-                    self.servo.setServoAngle('1', a)
-                    time.sleep(0.01)
-                grabbed = True
-                break
-            elif d < 11.0:
-                self.motor.setMotorModel(800, 800)
-            else:
-                self.motor.setMotorModel(1200, 1200)
-            time.sleep(0.05)
-
-        self.motor.stop()
-        return grabbed
-
-    def _clamp_release(self):
-        """Lower the arm to deposit the object, then return to rest."""
-        print("  [clamp] releasing…")
-        self.motor.stop()
-        for a in range(140, 89, -1):                     # open arm
-            self.servo.setServoAngle('1', a)
-            time.sleep(0.01)
-        for a in range(130, 89, -1):                     # retract arm
-            self.servo.setServoAngle('0', a)
-            time.sleep(0.01)
-        for a in range(90, 140):                         # close arm (rest)
-            self.servo.setServoAngle('1', a)
-            time.sleep(0.01)
-        print("  [clamp] done.")
-
-    # ── Single-step behaviours ────────────────────────────────────────────────
-
-    def _step_line_follow(self, distance):
-        """
-        One tick of line-following.
-        If an object is within pickup range, grab it, carry it aside,
-        deposit it, then return to the original heading.
-
-        IR bit layout (read_all returns 3-bit int):
-          bit2=left, bit1=centre, bit0=right
-          2 (010) → straight
-          4 (100) → veer left
-          6 (110) → sharp left
-          1 (001) → veer right
-          3 (011) → sharp right
-          7 (111) → all sensors → stop
-          0 (000) → no line
-        """
-        # ── Proximity pickup ─────────────────────────────────────────────────
-        if 0 < distance <= self.PICKUP_MAX:
-            self.motor.stop()
-            grabbed = self._clamp_approach_and_grab()
-            if grabbed:
-                # Turn aside, deposit, turn back
-                self.motor.setMotorModel(-1500, 1500)
-                time.sleep(1.5)
-                self.motor.stop()
-                self._clamp_release()
-                self.motor.setMotorModel(1500, -1500)
-                time.sleep(1.4)
-                self.motor.stop()
-            return
-
-        # ── Line following ───────────────────────────────────────────────────
-        ir = self.ir.read_all()
-        if   ir == 2: self.motor.setMotorModel( self.SPEED_FWD,   self.SPEED_FWD)
-        elif ir == 4: self.motor.setMotorModel(-self.SPEED_TURN,  self.SPEED_SHARP)
-        elif ir == 6: self.motor.setMotorModel(-2000,              4000)
-        elif ir == 1: self.motor.setMotorModel( self.SPEED_SHARP, -self.SPEED_TURN)
-        elif ir == 3: self.motor.setMotorModel( 4000,             -2000)
-        elif ir == 7: self.motor.stop()
-        # ir == 0 handled in the main loop
-
-    def _step_avoid_obstacle(self):
-        """
-        One tick of pure obstacle avoidance (no line).
-        Backs up and turns away from anything closer than AVOID_DIST.
-        """
-        d = self.sonic.get_distance()
-        if 0 < d < self.AVOID_DIST:
-            self.motor.setMotorModel(-1500, -1500)
-            time.sleep(0.4)
-            self.motor.setMotorModel(-1500,  1500)
-            time.sleep(0.2)
-        else:
-            self.motor.setMotorModel(1500, 1500)
-        time.sleep(0.2)
-
-    # ── Main run loop ─────────────────────────────────────────────────────────
-
-    def run(self):
-        """
-        Main loop.
-        - Follows the black line while one is detected.
-        - Falls back to obstacle-avoidance mode if no line is found for 2 s.
-        - Returns to line-following as soon as the line is picked up again.
-        """
-        print("Robot running — press Ctrl+C to stop.\n")
-        no_line_since = None
-
-        try:
-            while not self._stop:
-                ir       = self.ir.read_all()
-                distance = self.sonic.get_distance()
-
-                if ir == 0:
-                    # No line under any sensor
-                    if no_line_since is None:
-                        no_line_since = time.time()
-
-                    if time.time() - no_line_since > 2.0:
-                        # Line lost for > 2 s → switch to obstacle avoidance
-                        self._step_avoid_obstacle()
-                    else:
-                        # Briefly lost — creep forward hoping to re-acquire
-                        self.motor.setMotorModel(self.SPEED_FWD, self.SPEED_FWD)
-                        time.sleep(0.05)
-                else:
-                    no_line_since = None
-                    self._step_line_follow(distance)
-
-        except KeyboardInterrupt:
-            print("\nCtrl+C received — shutting down.")
-        finally:
-            self.close()
-
-    # ── Cleanup ───────────────────────────────────────────────────────────────
+    def start(self):
+        self.clamp_mode         = 0
+        self.infrared_run_stop  = False
+        if self.servo    is None: self.servo    = Servo()
+        if self.sonic    is None: self.sonic    = Ultrasonic()
+        if self.motor    is None: self.motor    = tankMotor()
+        if self.infrared is None: self.infrared = Infrared()
 
     def close(self):
-        self._stop = True
-        self.motor.stop()
+        self.clamp_mode = 0
         self.servo.setServoStop()
-        self.motor.close()
-        self.ir.close()
         self.sonic.close()
-        print("Robot stopped cleanly.")
+        self.motor.close()
+        self.infrared.close()
+        self.servo    = None
+        self.sonic    = None
+        self.motor    = None
+        self.infrared = None
+
+    def mode_ultrasonic(self):
+        distance = self.sonic.get_distance()
+        if distance != 0:
+            if distance < 45:
+                self.motor.setMotorModel(-750, -750)   # was -1500, -1500
+                time.sleep(0.4)
+                self.motor.setMotorModel(-750, 750)    # was -1500,  1500
+                time.sleep(0.2)
+            else:
+                self.motor.setMotorModel(750, 750)     # was  1500,  1500
+        time.sleep(0.2)
+
+    def mode_infrared(self):
+        distance      = self.sonic.get_distance()
+        infrared_value = self.infrared.read_all_infrared()
+
+        if infrared_value == 2:
+            self.motor.setMotorModel(600, 600)         # was  1200,  1200
+        elif infrared_value == 4:
+            self.motor.setMotorModel(-750, 1250)       # was -1500,  2500
+        elif infrared_value == 6:
+            self.motor.setMotorModel(-1000, 2000)      # was -2000,  4000
+        elif infrared_value == 1:
+            self.motor.setMotorModel(1250, -750)       # was  2500, -1500
+        elif infrared_value == 3:
+            self.motor.setMotorModel(2000, -1000)      # was  4000, -2000
+        elif infrared_value == 7:
+            self.motor.setMotorModel(0, 0)
+
+        if distance > 5.0 and distance <= 12.0:
+            self.motor.setMotorModel(0, 0)
+            self.set_mode_clamp(1)
+            while self.get_mode_clamp() == 1 and self.infrared_run_stop == False:
+                self.mode_clamp()
+            if self.infrared_run_stop == True:
+                self.motor.setMotorModel(0, 0)
+                return
+            self.motor.setMotorModel(-750, 750)        # was -1500,  1500
+            time.sleep(1.5)
+            self.motor.setMotorModel(0, 0)
+            self.set_mode_clamp(2)
+            while self.get_mode_clamp() == 2 and self.infrared_run_stop == False:
+                self.mode_clamp()
+            if self.infrared_run_stop == True:
+                self.motor.setMotorModel(0, 0)
+                return
+            self.motor.setMotorModel(750, -750)        # was  1500, -1500
+            time.sleep(1.4)
+
+    def mode_clamp_up(self):
+        if self.clamp_mode == 1:
+            distance = self.sonic.get_distance()
+            print("car_mode_clamp_up distance:", distance)
+            if distance <= 5:
+                self.motor.setMotorModel(-600, -600)   # was -1200, -1200
+            elif distance > 5 and distance < 7.5:
+                self.motor.setMotorModel(-400, -400)   # was  -800,  -800
+            elif distance >= 7.5 and distance <= 7.7:
+                self.motor.setMotorModel(0, 0)
+                for i in range(140, 90, -1):
+                    self.servo.setServoAngle('1', i)
+                    time.sleep(0.01)
+                for i in range(90, 130, 1):
+                    self.servo.setServoAngle('0', i)
+                    time.sleep(0.01)
+                for i in range(90, 140, 1):
+                    self.servo.setServoAngle('1', i)
+                    time.sleep(0.01)
+                self.clamp_mode = 0
+            elif distance > 7.7 and distance < 11:
+                self.motor.setMotorModel(400, 400)     # was   800,   800
+            elif distance >= 11:
+                self.motor.setMotorModel(600, 600)     # was  1200,  1200
+            time.sleep(0.05)
+
+    def mode_clamp_down(self):
+        if self.clamp_mode == 2:
+            self.motor.setMotorModel(0, 0)
+            for i in range(140, 90, -1):
+                self.servo.setServoAngle('1', i)
+                time.sleep(0.01)
+            for i in range(130, 90, -1):
+                self.servo.setServoAngle('0', i)
+                time.sleep(0.01)
+            for i in range(90, 140, 1):
+                self.servo.setServoAngle('1', i)
+                time.sleep(0.01)
+            self.clamp_mode = 0
+
+    def mode_clamp_stop(self):
+        self.motor.setMotorModel(0, 0)
+
+    def set_mode_clamp(self, mode=0):
+        self.clamp_mode = mode
+
+    def get_mode_clamp(self):
+        return self.clamp_mode
+
+    def mode_clamp(self, mode=None):
+        if mode is not None:
+            self.clamp_mode = mode
+        if self.clamp_mode == 1:
+            self.mode_clamp_up()
+        elif self.clamp_mode == 2:
+            self.mode_clamp_down()
+        elif self.clamp_mode == 0:
+            self.mode_clamp_stop()
 
 
 # =============================================================================
+# Entry point — runs the robot in infrared (line-follow + pickup) mode
+# =============================================================================
+
 if __name__ == '__main__':
-    robot = Robot()
-    robot.run()
+    car = Car()
+    print("Robot started. Press Ctrl+C to stop.")
+    try:
+        while True:
+            car.mode_infrared()
+    except KeyboardInterrupt:
+        car.close()
+        print("\nRobot stopped.")
