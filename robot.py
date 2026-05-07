@@ -7,9 +7,15 @@ Run from Code/Server/ on the Raspberry Pi:
     cd ~/Freenove_Tank_Robot_Kit_for_Raspberry_Pi/Code/Server
     python3 robot.py
 
-All classes are copied exactly from the Freenove source files:
+Combines (exactly from Freenove source files):
   parameter.py · infrared.py · ultrasonic.py · motor.py · servo.py · car.py
-Only the motor speed values have been halved.
+
+Plus red ball detection from Red_Ball_Detection.py.
+
+Behaviour priority:
+  1. Red ball visible  → steer toward it; pick up when within range
+  2. Obstacle 12-45 cm → back up and turn away
+  3. Otherwise         → follow the black line
 """
 
 import os
@@ -17,6 +23,8 @@ import json
 import subprocess
 import time
 import warnings
+import cv2
+import numpy as np
 
 # =============================================================================
 # parameter.py — ParameterManager
@@ -192,6 +200,7 @@ class gpiozero_ultrasonic:
             raise RuntimeError("gpiozero library not available")
 
     def get_distance(self):
+        # Wrapped in try/except to prevent background-thread NoneType crash
         try:
             distance_cm = self.sensor.distance * 100
             return round(float(distance_cm), 1)
@@ -200,7 +209,10 @@ class gpiozero_ultrasonic:
 
     def close(self):
         if hasattr(self, 'sensor'):
-            self.sensor.close()
+            try:
+                self.sensor.close()
+            except Exception:
+                pass
 
 
 class lgpiod_ultrasonic:
@@ -478,24 +490,91 @@ class Servo:
 
 
 # =============================================================================
-# car.py — Car  (motor speeds halved from original)
+# Red_Ball_Detection.py — RedBallDetector
+# =============================================================================
+
+class RedBallDetector:
+    """
+    Uses OpenCV to detect a red ball from the camera feed.
+    detect() returns (detected, center_x, radius)
+      detected  — True if a red ball is found
+      center_x  — horizontal position in the 320-wide frame (0=left, 320=right)
+      radius    — size of the ball in pixels (larger = closer)
+    """
+
+    FRAME_WIDTH  = 320
+    FRAME_HEIGHT = 240
+
+    def __init__(self):
+        self.cap = cv2.VideoCapture(0)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.FRAME_WIDTH)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.FRAME_HEIGHT)
+        if not self.cap.isOpened():
+            print("Warning: camera not available, red ball detection disabled.")
+
+    def detect(self):
+        if not self.cap.isOpened():
+            return False, 0, 0
+
+        ret, frame = self.cap.read()
+        if not ret:
+            return False, 0, 0
+
+        # Convert to HSV
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        # Red wraps around the hue spectrum — need two ranges
+        lower_red1 = np.array([0,   120,  70])
+        upper_red1 = np.array([10,  255, 255])
+        lower_red2 = np.array([170, 120,  70])
+        upper_red2 = np.array([180, 255, 255])
+
+        mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+        mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+        mask  = cv2.bitwise_or(mask1, mask2)
+
+        # Remove noise
+        mask = cv2.erode(mask,  None, iterations=2)
+        mask = cv2.dilate(mask, None, iterations=2)
+
+        contours, _ = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if len(contours) > 0:
+            largest = max(contours, key=cv2.contourArea)
+            ((x, y), radius) = cv2.minEnclosingCircle(largest)
+            M = cv2.moments(largest)
+            if radius > 10 and M["m00"] > 0:
+                center_x = int(M["m10"] / M["m00"])
+                return True, center_x, radius
+
+        return False, 0, 0
+
+    def close(self):
+        if hasattr(self, 'cap') and self.cap.isOpened():
+            self.cap.release()
+
+
+# =============================================================================
+# car.py — Car  (motor speeds halved from original + red ball + obstacle fix)
 # =============================================================================
 
 class Car:
     def __init__(self):
-        self.servo    = None
-        self.sonic    = None
-        self.motor    = None
-        self.infrared = None
+        self.servo      = None
+        self.sonic      = None
+        self.motor      = None
+        self.infrared   = None
+        self.detector   = None
         self.start()
 
     def start(self):
-        self.clamp_mode         = 0
-        self.infrared_run_stop  = False
+        self.clamp_mode        = 0
+        self.infrared_run_stop = False
         if self.servo    is None: self.servo    = Servo()
         if self.sonic    is None: self.sonic    = Ultrasonic()
         if self.motor    is None: self.motor    = tankMotor()
         if self.infrared is None: self.infrared = Infrared()
+        if self.detector is None: self.detector = RedBallDetector()
 
     def close(self):
         self.clamp_mode = 0
@@ -503,10 +582,14 @@ class Car:
         self.sonic.close()
         self.motor.close()
         self.infrared.close()
+        self.detector.close()
         self.servo    = None
         self.sonic    = None
         self.motor    = None
         self.infrared = None
+        self.detector = None
+
+    # ── Ultrasonic-only obstacle avoidance ───────────────────────────────────
 
     def mode_ultrasonic(self):
         distance = self.sonic.get_distance()
@@ -520,10 +603,59 @@ class Car:
                 self.motor.setMotorModel(750, 750)     # was  1500,  1500
         time.sleep(0.2)
 
+    # ── Line follow + obstacle avoidance + red ball pickup ───────────────────
+
     def mode_infrared(self):
-        distance      = self.sonic.get_distance()
+        distance       = self.sonic.get_distance()
         infrared_value = self.infrared.read_all_infrared()
 
+        # 1. Red ball detection — highest priority
+        ball_detected, center_x, radius = self.detector.detect()
+
+        if ball_detected:
+            print(f"Red ball detected: center_x={center_x}, radius={radius:.1f}, distance={distance}")
+
+            # Close enough to pick up
+            if distance > 5.0 and distance <= 12.0:
+                self.motor.setMotorModel(0, 0)
+                self.set_mode_clamp(1)
+                while self.get_mode_clamp() == 1 and self.infrared_run_stop == False:
+                    self.mode_clamp()
+                if self.infrared_run_stop:
+                    self.motor.setMotorModel(0, 0)
+                    return
+                self.motor.setMotorModel(-750, 750)    # was -1500,  1500
+                time.sleep(1.5)
+                self.motor.setMotorModel(0, 0)
+                self.set_mode_clamp(2)
+                while self.get_mode_clamp() == 2 and self.infrared_run_stop == False:
+                    self.mode_clamp()
+                if self.infrared_run_stop:
+                    self.motor.setMotorModel(0, 0)
+                    return
+                self.motor.setMotorModel(750, -750)    # was  1500, -1500
+                time.sleep(1.4)
+
+            else:
+                # Steer toward the ball using center_x
+                # Frame is 320 px wide: left zone <120, centre 120-200, right zone >200
+                if center_x < 120:
+                    self.motor.setMotorModel(-750, 1250)   # turn left toward ball
+                elif center_x > 200:
+                    self.motor.setMotorModel(1250, -750)   # turn right toward ball
+                else:
+                    self.motor.setMotorModel(600, 600)     # drive straight at ball
+            return
+
+        # 2. Obstacle avoidance (12-45 cm, no ball) — medium priority
+        if distance > 12.0 and distance < 45.0:
+            self.motor.setMotorModel(-750, -750)       # was -1500, -1500
+            time.sleep(0.4)
+            self.motor.setMotorModel(-750, 750)        # was -1500,  1500
+            time.sleep(0.2)
+            return
+
+        # 3. Line following — base behaviour
         if infrared_value == 2:
             self.motor.setMotorModel(600, 600)         # was  1200,  1200
         elif infrared_value == 4:
@@ -537,25 +669,7 @@ class Car:
         elif infrared_value == 7:
             self.motor.setMotorModel(0, 0)
 
-        if distance > 5.0 and distance <= 12.0:
-            self.motor.setMotorModel(0, 0)
-            self.set_mode_clamp(1)
-            while self.get_mode_clamp() == 1 and self.infrared_run_stop == False:
-                self.mode_clamp()
-            if self.infrared_run_stop == True:
-                self.motor.setMotorModel(0, 0)
-                return
-            self.motor.setMotorModel(-750, 750)        # was -1500,  1500
-            time.sleep(1.5)
-            self.motor.setMotorModel(0, 0)
-            self.set_mode_clamp(2)
-            while self.get_mode_clamp() == 2 and self.infrared_run_stop == False:
-                self.mode_clamp()
-            if self.infrared_run_stop == True:
-                self.motor.setMotorModel(0, 0)
-                return
-            self.motor.setMotorModel(750, -750)        # was  1500, -1500
-            time.sleep(1.4)
+    # ── Clamp operations ─────────────────────────────────────────────────────
 
     def mode_clamp_up(self):
         if self.clamp_mode == 1:
@@ -581,7 +695,7 @@ class Car:
                 self.motor.setMotorModel(400, 400)     # was   800,   800
             elif distance >= 11:
                 self.motor.setMotorModel(600, 600)     # was  1200,  1200
-            time.sleep(0.05)
+            time.sleep(0.1)                            # increased from 0.05 to reduce sensor hammering
 
     def mode_clamp_down(self):
         if self.clamp_mode == 2:
@@ -618,7 +732,7 @@ class Car:
 
 
 # =============================================================================
-# Entry point — runs the robot in infrared (line-follow + pickup) mode
+# Entry point
 # =============================================================================
 
 if __name__ == '__main__':
